@@ -141,4 +141,82 @@ private class ChatterInlineImagesControllerTest {
         String name = ChatterInlineImagesController.getMentionableName(fakeCaseId);
         System.assertEquals(null, name, 'non-user/group prefix returns null');
     }
+
+    // ─── searchMentionableUsers ─────────────────────────────────────
+
+    @IsTest
+    static void searchMentionableUsers_matchesRunningUserByNameFragment() {
+        User me = [SELECT Id, Name, IsActive FROM User WHERE Id = :UserInfo.getUserId()];
+
+        // Search on the full name rather than a short (e.g. 3-char) fragment.
+        // A short fragment is fine in a near-empty scratch org, but in
+        // production the query's `ORDER BY Name LIMIT 8` can easily push the
+        // running user out of the result window when many other real users
+        // share that same name prefix. The full name is selective enough
+        // that the running user (almost always) sorts within the top 8
+        // matches regardless of how much other user data exists in the org.
+        Test.startTest();
+        List<ChatterInlineImagesController.MentionCandidate> results =
+            ChatterInlineImagesController.searchMentionableUsers(me.Name);
+        Test.stopTest();
+
+        Boolean found = false;
+        for (ChatterInlineImagesController.MentionCandidate c : results) {
+            if (c.recordId == me.Id) {
+                found = true;
+                System.assertEquals(me.Name, c.name, 'candidate name matches user name');
+            }
+        }
+        System.assert(found, 'running user is returned as a candidate for their own full name');
+    }
+
+    @IsTest
+    static void searchMentionableUsers_blankTermReturnsResultsWithinLimit() {
+        Test.startTest();
+        List<ChatterInlineImagesController.MentionCandidate> results =
+            ChatterInlineImagesController.searchMentionableUsers('');
+        Test.stopTest();
+
+        System.assert(results.size() <= 8, 'never returns more than the 8-result cap');
+    }
+
+    @IsTest
+    static void searchMentionableUsers_excludesNonStandardUserType() {
+        // We don't fabricate a community/portal user here — that needs a
+        // license assignment a test can't reliably set up across orgs.
+        // Instead, check against whatever non-Standard active users
+        // already exist (if any) in the org this test runs in.
+        List<User> nonStandard = [
+            SELECT Id, Name FROM User
+            WHERE IsActive = true AND UserType != 'Standard'
+            LIMIT 1
+        ];
+        if (nonStandard.isEmpty()) {
+            return;
+        }
+
+        Test.startTest();
+        List<ChatterInlineImagesController.MentionCandidate> results =
+            ChatterInlineImagesController.searchMentionableUsers(nonStandard[0].Name);
+        Test.stopTest();
+
+        for (ChatterInlineImagesController.MentionCandidate c : results) {
+            System.assertNotEquals(
+                nonStandard[0].Id, c.recordId,
+                'non-Standard UserType is excluded from mention search'
+            );
+        }
+    }
+
+    @IsTest
+    static void searchMentionableUsers_noMatchReturnsEmptyList() {
+        Test.startTest();
+        List<ChatterInlineImagesController.MentionCandidate> results =
+            ChatterInlineImagesController.searchMentionableUsers(
+                'zzzzznonexistentusernamezzzzz'
+            );
+        Test.stopTest();
+
+        System.assertEquals(0, results.size(), 'no matches returns an empty list, not null');
+    }
 }

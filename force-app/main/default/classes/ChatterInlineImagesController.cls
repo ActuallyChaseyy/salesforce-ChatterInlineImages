@@ -18,6 +18,12 @@ public with sharing class ChatterInlineImagesController {
         @AuraEnabled public String downloadUrl;
     }
 
+    public class MentionCandidate {
+        @AuraEnabled public String recordId;
+        @AuraEnabled public String name;
+        @AuraEnabled public String photoUrl;
+    }
+
     /**
      * Uploads a base64-encoded image as a ContentVersion linked to parentId
      * and returns a document download URL that the LWC can embed in an
@@ -82,5 +88,45 @@ public with sharing class ChatterInlineImagesController {
             return groups.isEmpty() ? null : groups[0].Name;
         }
         return null;
+    }
+
+    /**
+     * Type-ahead search for the @mention dropdown in the LWC: as the user
+     * types after "@", this returns matching active Users so the editor can
+     * render a live picklist instead of requiring the old modal record
+     * picker. Limited to 8 results — this backs an inline typeahead, not a
+     * full search results page.
+     *
+     * Restricted to UserType = 'Standard' so community-licensed customers
+     * and partners (Chatter External, CustomerSuccess, PowerPartner, etc.)
+     * never show up here — without it, staff trying to mention a colleague
+     * get buried under every customer contact who happens to share part of
+     * that name.
+     */
+    @AuraEnabled(cacheable=true)
+    public static List<MentionCandidate> searchMentionableUsers(String searchTerm) {
+        String term = '%' + String.escapeSingleQuotes(
+            searchTerm == null ? '' : searchTerm
+        ) + '%';
+
+        List<User> users = [
+            SELECT Id, Name, SmallPhotoUrl
+            FROM User
+            WHERE IsActive = true
+            AND UserType = 'Standard'
+            AND Name LIKE :term
+            ORDER BY Name
+            LIMIT 8
+        ];
+
+        List<MentionCandidate> results = new List<MentionCandidate>();
+        for (User u : users) {
+            MentionCandidate c = new MentionCandidate();
+            c.recordId = u.Id;
+            c.name = u.Name;
+            c.photoUrl = u.SmallPhotoUrl;
+            results.add(c);
+        }
+        return results;
     }
 }

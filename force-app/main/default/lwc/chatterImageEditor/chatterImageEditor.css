@@ -1,12 +1,107 @@
 .publisher-editor {
+    position: relative;
     border: 1px solid #dddbda;
     border-radius: 4px;
+    padding-bottom: 10px;
 }
 
 .publisher-editor lightning-input-rich-text {
     min-height: 150px;
+    display: block;
+}
+
+.resize-handle {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+    z-index: 2;
+    background-image: repeating-linear-gradient(
+        135deg,
+        #706e6b 0,
+        #706e6b 1px,
+        transparent 1px,
+        transparent 4px
+    );
+    opacity: 0.55;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+    opacity: 1;
 }
 
 .visibility-combobox {
     width: 16rem;
+}
+
+/*
+ * Floats over the editor near an estimated caret position (top/left are
+ * set inline, computed in JS via the mirror-div technique below) rather
+ * than pushing the toolbar/visibility selector down. It's an estimate, not
+ * real caret tracking — see the JS comment on _updateMentionDropdownPosition
+ * for why exact tracking isn't reachable, and how the mirror gets closer.
+ */
+.mention-dropdown {
+    position: absolute;
+    width: 300px;
+    max-width: calc(100% - 1.5rem);
+    z-index: 5;
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem 0;
+    max-height: 14rem;
+    overflow-y: auto;
+    border: 1px solid #dddbda;
+    border-radius: 4px;
+    background: #fff;
+    box-shadow: 0 2px 6px 0 rgba(0, 0, 0, 0.16);
+}
+
+/*
+ * Off-screen clone used only to measure where typed text would wrap and
+ * end, so we can estimate the caret's on-screen position — see the JS
+ * comment on _updateMentionDropdownPosition. Its width/font are set
+ * dynamically in JS to match the real editor before each measurement.
+ */
+.mention-caret-mirror {
+    position: absolute;
+    visibility: hidden;
+    top: -9999px;
+    left: -9999px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    box-sizing: border-box;
+    padding: 0;
+    border: 0;
+    pointer-events: none;
+}
+
+.mention-dropdown__item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font-size: 0.8125rem;
+    color: #080707;
+    cursor: pointer;
+}
+
+.mention-dropdown__item:hover,
+.mention-dropdown__item:focus {
+    background-color: #f3f3f3;
+}
+
+.mention-dropdown__avatar {
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+    flex-shrink: 0;
 }

@@ -4,7 +4,7 @@
         <name>Post_To_Chatter</name>
         <label>Post To Chatter</label>
         <locationX>176</locationX>
-        <locationY>350</locationY>
+        <locationY>242</locationY>
         <actionName>ChatterInlineImagePoster</actionName>
         <actionType>apex</actionType>
         <flowTransactionModel>Automatic</flowTransactionModel>
@@ -30,10 +30,9 @@
         <offset>0</offset>
     </actionCalls>
     <apiVersion>62.0</apiVersion>
-    <description>Demo flow for the chatter-inline-images package. Shows a rich text editor screen where users can paste screenshots, then posts the content to the native Chatter feed with real inline images via ConnectApi.</description>
     <environments>Default</environments>
     <interviewLabel>Chatter Inline Image Post Demo {!$Flow.CurrentDateTime}</interviewLabel>
-    <label>Chatter Inline Image Post Demo</label>
+    <label>Chatter Inline Image Post</label>
     <processMetadataValues>
         <name>BuilderType</name>
         <value>
@@ -58,18 +57,13 @@
         <name>Editor</name>
         <label>Post to Chatter</label>
         <locationX>176</locationX>
-        <locationY>242</locationY>
+        <locationY>134</locationY>
         <allowBack>false</allowBack>
         <allowFinish>true</allowFinish>
         <allowPause>false</allowPause>
         <connector>
             <targetReference>Post_To_Chatter</targetReference>
         </connector>
-        <fields>
-            <name>IntroText</name>
-            <fieldText>&lt;p style=&quot;text-align: center;&quot;&gt;&lt;strong style=&quot;font-size: 18px;&quot;&gt;Post a Chatter Update&lt;/strong&gt;&lt;/p&gt;&lt;p style=&quot;text-align: center;&quot;&gt;Paste screenshots directly with Ctrl+V — they will render inline in the feed.&lt;/p&gt;</fieldText>
-            <fieldType>DisplayText</fieldType>
-        </fields>
         <fields>
             <name>EditorComponent</name>
             <extensionName>c:chatterImageEditor</extensionName>
