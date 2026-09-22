@@ -252,18 +252,6 @@ The `chatterImageEditor` LWC exposes these flow screen properties:
 
 ## Known limitations
 
-> **Pasted images append at the end of the editor, not at cursor position.**
-> We block Quill's paste handler entirely, so Quill has no idea about the image — it just sees the updated `richTextValue` and re-renders. Mentions *do* insert at cursor position via `execCommand`.
-
-> **Mention picker uses a button, not inline `@` typeahead.**
-> Inline typeahead would require hooking into Quill's internal change events and positioning an overlay at the caret, which is painful across shadow DOM boundaries. The button + record picker is 1/5 the work.
-
-> **Stability note.**
-> The focus-tracking + capture-phase approach doesn't depend on any internal Salesforce APIs, so it should be stable. If Salesforce ever changes how `lightning-input-rich-text` dispatches paste events, this could break.
-
-> **External visibility.**
-> If you post with `AllUsers` visibility, uploaded images need their `ContentDocumentLink.Visibility` set to `AllUsers` too. The invocable does this automatically.
-
 > **No drag-drop yet — paste only.**
 
 ---
