@@ -130,6 +130,9 @@ public with sharing class ChatterInlineImagePoster {
     private static final Pattern SAFE_LINK_URL_PATTERN =
         Pattern.compile('(?i)^(https?://|mailto:).+');
 
+    // ConnectApi's files capability accepts at most 10 files per feed element.
+    private static final Integer MAX_ATTACHMENTS = 10;
+
     @InvocableMethod(
         label='Post Chatter FeedItem with Inline Images'
         description='Posts a Chatter FeedItem via ConnectApi with inline images and optional @mentions parsed from rich text HTML produced by the chatterImageEditor LWC.'
@@ -144,8 +147,14 @@ public with sharing class ChatterInlineImagePoster {
                 if (req.parentId == null) {
                     throw new IllegalArgumentException('parentId is required');
                 }
-                if (String.isBlank(req.richTextHtml)) {
+                List<Id> attachmentDocIds = parseAttachmentIds(req.attachmentIds);
+                if (String.isBlank(req.richTextHtml) && attachmentDocIds.isEmpty()) {
                     throw new IllegalArgumentException('richTextHtml is required');
+                }
+                if (attachmentDocIds.size() > MAX_ATTACHMENTS) {
+                    throw new IllegalArgumentException(
+                        'A post can have at most ' + MAX_ATTACHMENTS + ' attachments'
+                    );
                 }
 
                 ConnectApi.FeedItemVisibilityType visibility = resolveVisibility(req.visibility);
@@ -154,22 +163,35 @@ public with sharing class ChatterInlineImagePoster {
                 List<ConnectApi.MessageSegmentInput> segments =
                     buildSegments(req.richTextHtml, imageDocIds);
 
-                if (segments.isEmpty()) {
+                if (visibility == ConnectApi.FeedItemVisibilityType.InternalUsers) {
+                    assertNoCustomerMentions(segments);
+                }
+
+                if (segments.isEmpty() && attachmentDocIds.isEmpty()) {
                     ConnectApi.TextSegmentInput empty = new ConnectApi.TextSegmentInput();
                     empty.text = '(no content)';
                     segments.add(empty);
                 }
 
-                updateContentDocumentLinkVisibility(imageDocIds, req.parentId, visibility);
+                Set<Id> allDocIds = new Set<Id>(imageDocIds);
+                allDocIds.addAll(attachmentDocIds);
+                updateContentDocumentLinkVisibility(allDocIds, req.parentId, visibility);
 
                 ConnectApi.FeedItemInput feedItemInput = new ConnectApi.FeedItemInput();
                 feedItemInput.subjectId = req.parentId;
                 feedItemInput.feedElementType = ConnectApi.FeedElementType.FeedItem;
                 feedItemInput.visibility = visibility;
 
-                ConnectApi.MessageBodyInput body = new ConnectApi.MessageBodyInput();
-                body.messageSegments = segments;
-                feedItemInput.body = body;
+                // A files-only post has no segments; it goes without a body.
+                if (!segments.isEmpty()) {
+                    ConnectApi.MessageBodyInput body = new ConnectApi.MessageBodyInput();
+                    body.messageSegments = segments;
+                    feedItemInput.body = body;
+                }
+
+                if (!attachmentDocIds.isEmpty()) {
+                    feedItemInput.capabilities = buildFilesCapability(attachmentDocIds);
+                }
 
                 ConnectApi.FeedElement posted =
                     ConnectApi.ChatterFeeds.postFeedElement(null, feedItemInput);
@@ -184,6 +206,79 @@ public with sharing class ChatterInlineImagePoster {
         }
 
         return results;
+    }
+
+    // ─── File attachments ────────────────────────────────────────────────
+    // Files attached with the editor's upload button (as opposed to pasted
+    // inline images) go on the post through the files capability, so they
+    // show as attachments under the post like the native publisher's
+    // paperclip.
+
+    /**
+     * Valid ContentDocumentIds from the flow's attachment collection, in
+     * order and without duplicates. Anything that isn't a 069 Id is dropped.
+     */
+    @TestVisible
+    private static List<Id> parseAttachmentIds(List<String> rawIds) {
+        List<Id> ids = new List<Id>();
+        if (rawIds == null) return ids;
+        Set<Id> seen = new Set<Id>();
+        for (String raw : rawIds) {
+            if (String.isBlank(raw)) continue;
+            Id docId = extractContentDocumentId(raw.trim());
+            if (docId != null && !seen.contains(docId)) {
+                seen.add(docId);
+                ids.add(docId);
+            }
+        }
+        return ids;
+    }
+
+    @TestVisible
+    private static ConnectApi.FeedElementCapabilitiesInput buildFilesCapability(List<Id> docIds) {
+        ConnectApi.FilesCapabilityInput files = new ConnectApi.FilesCapabilityInput();
+        files.items = new List<ConnectApi.FileIdInput>();
+        for (Id docId : docIds) {
+            ConnectApi.FileIdInput file = new ConnectApi.FileIdInput();
+            file.id = docId;
+            files.items.add(file);
+        }
+        ConnectApi.FeedElementCapabilitiesInput capabilities = new ConnectApi.FeedElementCapabilitiesInput();
+        capabilities.files = files;
+        return capabilities;
+    }
+
+    /**
+     * Customers (any non-Standard UserType) can't see an Internal Users Only
+     * post, so mentioning one there silently does nothing. The LWC already
+     * stops this (no customers in the typeahead, validate() blocks the
+     * screen), but the flow can still be handed hand-edited HTML or a
+     * visibility changed after the fact — this is the backstop.
+     */
+    @TestVisible
+    private static void assertNoCustomerMentions(List<ConnectApi.MessageSegmentInput> segments) {
+        Set<Id> userIds = new Set<Id>();
+        for (ConnectApi.MessageSegmentInput seg : segments) {
+            if (seg instanceof ConnectApi.MentionSegmentInput) {
+                Id mentionId = ((ConnectApi.MentionSegmentInput) seg).id;
+                if (mentionId != null && mentionId.getSObjectType() == User.SObjectType) {
+                    userIds.add(mentionId);
+                }
+            }
+        }
+        if (userIds.isEmpty()) return;
+
+        List<String> customerNames = new List<String>();
+        for (User u : [SELECT Name FROM User WHERE Id IN :userIds AND UserType != 'Standard']) {
+            customerNames.add(u.Name);
+        }
+        if (!customerNames.isEmpty()) {
+            throw new IllegalArgumentException(
+                'Customers can\'t be mentioned in an Internal Users Only post: '
+                + String.join(customerNames, ', ')
+                + '. Change the post to All with Access, or remove the mention.'
+            );
+        }
     }
 
     // ─── Segment Builder (testable in isolation) ─────────────────────────
@@ -457,11 +552,33 @@ public with sharing class ChatterInlineImagePoster {
     private static void appendTextSegment(
         List<ConnectApi.MessageSegmentInput> segments, String rawHtml
     ) {
-        String plain = stripHtmlToPlainText(rawHtml);
-        if (String.isBlank(plain)) return;
+        String plain = htmlChunkToSegmentText(rawHtml);
+        if (String.isEmpty(plain)) return;
         ConnectApi.TextSegmentInput seg = new ConnectApi.TextSegmentInput();
         seg.text = plain;
         segments.add(seg);
+    }
+
+    /**
+     * Plain text for one HTML chunk sitting between two markers, keeping
+     * the spaces at its edges.
+     *
+     * Each chunk is only a fragment of a sentence — the text between, say,
+     * a word and the hyperlink, mention or bold run that follows it — so
+     * its leading/trailing spaces are the gaps between words, not padding.
+     * Trimming them (as stripHtmlToPlainText does for whole-document text)
+     * ran words together in the posted feed item: "see <a>link</a> now"
+     * posted as "seelinknow". This showed up most often around URLs, which
+     * the editor auto-links as the user types.
+     *
+     * Edge whitespace containing a line break is still dropped: the chunk
+     * has no <br>/</p>/</div> of its own (those are markers), so a newline
+     * here is only source formatting between tags, not user content.
+     */
+    private static String htmlChunkToSegmentText(String html) {
+        if (String.isEmpty(html)) return '';
+        String text = decodeHtmlEntities(html.replaceAll('<[^>]+>', ''));
+        return text.replaceAll('^\\s*\\n\\s*', '').replaceAll('\\s*\\n\\s*$', '');
     }
 
     /**
@@ -488,15 +605,22 @@ public with sharing class ChatterInlineImagePoster {
      * actually produces. Used both for visible text and for a hyperlink's
      * href — an href like "?a=1&amp;b=2" needs the &amp; decoded before the
      * URL is usable or scheme-checked.
+     *
+     * &amp; must be decoded LAST. When a user literally types "&lt;" in
+     * the editor, Quill encodes it as "&amp;lt;"; decoding &amp; first
+     * turned that back into "&lt;", which the next replace then decoded a
+     * second time into "<" — so the post showed a different character from
+     * the one the user typed.
      */
+    @TestVisible
     private static String decodeHtmlEntities(String text) {
         return text.replace('&nbsp;', ' ')
-                   .replace('&amp;', '&')
                    .replace('&lt;', '<')
                    .replace('&gt;', '>')
                    .replace('&quot;', '"')
                    .replace('&#39;', '\'')
-                   .replace('&apos;', '\'');
+                   .replace('&apos;', '\'')
+                   .replace('&amp;', '&');
     }
 
     @TestVisible
@@ -566,6 +690,12 @@ public with sharing class ChatterInlineImagePoster {
             description='InternalUsers or AllUsers. Defaults to InternalUsers.'
         )
         public String visibility;
+
+        @InvocableVariable(
+            label='Attachment Ids'
+            description='ContentDocumentIds (069...) to attach to the post as files, e.g. chatterImageEditor.attachmentIds. Up to 10. When set, Rich Text HTML may be blank.'
+        )
+        public List<String> attachmentIds;
     }
 
     public class Result {

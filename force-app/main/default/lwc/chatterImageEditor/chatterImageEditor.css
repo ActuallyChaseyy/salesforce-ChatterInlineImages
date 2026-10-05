@@ -105,3 +105,30 @@
     margin-right: 0.5rem;
     flex-shrink: 0;
 }
+
+.attachment-pills lightning-pill {
+    margin: 0 0.25rem 0.25rem 0;
+}
+
+/* Opened programmatically by the custom toolbar image button. */
+.image-file-input {
+    display: none;
+}
+
+.mention-dropdown__text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.mention-dropdown__name,
+.mention-dropdown__subtitle {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mention-dropdown__subtitle {
+    font-size: 0.75rem;
+    color: #706e6b;
+}

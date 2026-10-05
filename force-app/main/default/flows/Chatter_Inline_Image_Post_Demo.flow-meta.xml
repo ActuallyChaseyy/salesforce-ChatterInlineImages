@@ -9,6 +9,12 @@
         <actionType>apex</actionType>
         <flowTransactionModel>Automatic</flowTransactionModel>
         <inputParameters>
+            <name>attachmentIds</name>
+            <value>
+                <elementReference>EditorComponent.attachmentIds</elementReference>
+            </value>
+        </inputParameters>
+        <inputParameters>
             <name>parentId</name>
             <value>
                 <elementReference>recordId</elementReference>

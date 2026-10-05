@@ -100,6 +100,31 @@ private class ChatterInlineImagesControllerTest {
         System.assert(threw, 'blank base64 throws AuraHandledException');
     }
 
+    // ─── removeAttachment ───────────────────────────────────────────
+
+    @IsTest
+    static void removeAttachment_deletesRunningUsersFile() {
+        CollaborationGroup a = setupParent();
+        ChatterInlineImagesController.UploadResult upload =
+            ChatterInlineImagesController.uploadImage(a.Id, 'remove-me.png', RED_PNG_B64);
+
+        Test.startTest();
+        ChatterInlineImagesController.removeAttachment(upload.contentDocumentId);
+        Test.stopTest();
+
+        System.assertEquals(
+            0,
+            [SELECT COUNT() FROM ContentDocument WHERE Id = :upload.contentDocumentId],
+            'file is deleted'
+        );
+    }
+
+    @IsTest
+    static void removeAttachment_nullIsIgnored() {
+        ChatterInlineImagesController.removeAttachment(null);
+        System.assert(true, 'null id does not throw');
+    }
+
     @IsTest
     static void getMentionableName_returnsRunningUserName() {
         Id userId = UserInfo.getUserId();
@@ -157,7 +182,7 @@ private class ChatterInlineImagesControllerTest {
         // matches regardless of how much other user data exists in the org.
         Test.startTest();
         List<ChatterInlineImagesController.MentionCandidate> results =
-            ChatterInlineImagesController.searchMentionableUsers(me.Name);
+            ChatterInlineImagesController.searchMentionableUsers(me.Name, null, true);
         Test.stopTest();
 
         Boolean found = false;
@@ -174,38 +199,69 @@ private class ChatterInlineImagesControllerTest {
     static void searchMentionableUsers_blankTermReturnsResultsWithinLimit() {
         Test.startTest();
         List<ChatterInlineImagesController.MentionCandidate> results =
-            ChatterInlineImagesController.searchMentionableUsers('');
+            ChatterInlineImagesController.searchMentionableUsers('', null, true);
         Test.stopTest();
 
         System.assert(results.size() <= 8, 'never returns more than the 8-result cap');
     }
 
     @IsTest
-    static void searchMentionableUsers_excludesNonStandardUserType() {
-        // We don't fabricate a community/portal user here — that needs a
-        // license assignment a test can't reliably set up across orgs.
-        // Instead, check against whatever non-Standard active users
-        // already exist (if any) in the org this test runs in.
-        List<User> nonStandard = [
-            SELECT Id, Name FROM User
-            WHERE IsActive = true AND UserType != 'Standard'
-            LIMIT 1
-        ];
-        if (nonStandard.isEmpty()) {
-            return;
+    static void searchMentionableUsers_ranksStaffThenCaseContactThenAccountUsers() {
+        ChatterMentionTestData d = ChatterMentionTestData.create();
+
+        List<ChatterInlineImagesController.MentionCandidate> results;
+        System.runAs(d.agent) {
+            Test.startTest();
+            results = ChatterInlineImagesController.searchMentionableUsers(
+                ChatterMentionTestData.NAME_PREFIX, d.supportCase.Id, true
+            );
+            Test.stopTest();
         }
 
-        Test.startTest();
-        List<ChatterInlineImagesController.MentionCandidate> results =
-            ChatterInlineImagesController.searchMentionableUsers(nonStandard[0].Name);
-        Test.stopTest();
+        System.assertEquals(3, results.size(), 'staff, case contact and account user — no other-account customers: ' + results);
+        System.assertEquals(d.agent.Id, results[0].recordId, 'staff come first');
+        System.assertEquals(false, results[0].isCustomer);
+        System.assertEquals(null, results[0].subtitle, 'staff have no subtitle');
 
-        for (ChatterInlineImagesController.MentionCandidate c : results) {
-            System.assertNotEquals(
-                nonStandard[0].Id, c.recordId,
-                'non-Standard UserType is excluded from mention search'
+        System.assertEquals(d.caseContactUser.Id, results[1].recordId, 'case contact comes second');
+        System.assertEquals(true, results[1].isCustomer);
+        System.assert(results[1].subtitle.startsWith('Case contact'), results[1].subtitle);
+        System.assert(results[1].subtitle.contains(ChatterMentionTestData.NAME_PREFIX + ' Account'), results[1].subtitle);
+
+        System.assertEquals(d.accountUser.Id, results[2].recordId, 'other users on the case account come third');
+        System.assertEquals(true, results[2].isCustomer);
+        System.assert(results[2].subtitle.startsWith('Customer'), results[2].subtitle);
+    }
+
+    @IsTest
+    static void searchMentionableUsers_excludesCustomersWhenNotRequested() {
+        ChatterMentionTestData d = ChatterMentionTestData.create();
+
+        List<ChatterInlineImagesController.MentionCandidate> results;
+        System.runAs(d.agent) {
+            results = ChatterInlineImagesController.searchMentionableUsers(
+                ChatterMentionTestData.NAME_PREFIX, d.supportCase.Id, false
             );
         }
+
+        System.assertEquals(1, results.size(), 'only staff for internal-only posts: ' + results);
+        System.assertEquals(d.agent.Id, results[0].recordId);
+    }
+
+    @IsTest
+    static void searchMentionableUsers_excludesCustomersWhenRecordIsNotACase() {
+        ChatterMentionTestData d = ChatterMentionTestData.create();
+        CollaborationGroup notACase = setupParent();
+
+        List<ChatterInlineImagesController.MentionCandidate> results;
+        System.runAs(d.agent) {
+            results = ChatterInlineImagesController.searchMentionableUsers(
+                ChatterMentionTestData.NAME_PREFIX, notACase.Id, true
+            );
+        }
+
+        System.assertEquals(1, results.size(), 'customers are only offered on a Case: ' + results);
+        System.assertEquals(d.agent.Id, results[0].recordId);
     }
 
     @IsTest
@@ -213,7 +269,7 @@ private class ChatterInlineImagesControllerTest {
         Test.startTest();
         List<ChatterInlineImagesController.MentionCandidate> results =
             ChatterInlineImagesController.searchMentionableUsers(
-                'zzzzznonexistentusernamezzzzz'
+                'zzzzznonexistentusernamezzzzz', null, true
             );
         Test.stopTest();
 

@@ -25,6 +25,8 @@ import { LightningElement, api } from 'lwc';
 import { FlowAttributeChangeEvent } from 'lightning/flowSupport';
 import uploadImage from '@salesforce/apex/ChatterInlineImagesController.uploadImage';
 import searchMentionableUsers from '@salesforce/apex/ChatterInlineImagesController.searchMentionableUsers';
+import removeAttachment from '@salesforce/apex/ChatterInlineImagesController.removeAttachment';
+import LightningPrompt from 'lightning/prompt';
 
 // 'font', 'size', 'header', 'color', and 'background' are deliberately
 // excluded: ConnectApi.MarkupType (the enum ChatterInlineImagePoster.cls
@@ -34,6 +36,12 @@ import searchMentionableUsers from '@salesforce/apex/ChatterInlineImagesControll
 // UnorderedList only). Offering those toolbar buttons let users apply
 // formatting that then silently vanished on post, since there's no segment
 // type that can carry it.
+//
+// 'image' and 'link' must stay in the list even though the built-in toolbar
+// buttons for them are hidden (see disabled-categories in the template, and
+// "Toolbar link and image buttons" below): formats also whitelists what the
+// editor keeps, so without 'image' Quill deletes every <img> from the
+// content, including pasted ones.
 const DEFAULT_FORMATS = [
     'bold', 'italic', 'underline', 'strike',
     'list', 'indent', 'align', 'link', 'image', 'clean',
@@ -51,6 +59,20 @@ const VISIBILITY_OPTIONS = [
 
 const MENTION_SEARCH_DEBOUNCE_MS = 250;
 
+// ConnectApi's files capability accepts at most 10 files per feed element.
+const MAX_ATTACHMENTS = 10;
+
+// Matches every <img> tag's src in the editor HTML.
+const IMG_SRC_PATTERN = /<img\b[^>]*\bsrc\s*=\s*["']([^"']*)["'][^>]*>/gi;
+// Same ContentDocumentId shape ChatterInlineImagePoster.cls extracts from an
+// img src — an image without one can't become an inline image segment.
+const CONTENT_DOC_ID_PATTERN = /069[a-zA-Z0-9]{12}/;
+
+// The link schemes ChatterInlineImagePoster.cls accepts (SAFE_LINK_URL_PATTERN).
+const SAFE_LINK_URL_PATTERN = /^(https?:\/\/|mailto:).+/i;
+// Placeholder href a new link carries until the user has entered its URL.
+const PENDING_LINK_URL_PREFIX = 'https://pending-link.invalid/';
+
 export default class ChatterImageEditor extends LightningElement {
 
     // ── Flow inputs ──────────────────────────────────────────────────────
@@ -61,6 +83,7 @@ export default class ChatterImageEditor extends LightningElement {
     @api disableAdvancedTools = false;
     @api hideVisibilitySelector = false;
     @api disableMentions = false;
+    @api hideAttachments = false;
     // Deprecated: replaced by disableMentions when the old Mention button
     // was removed in favor of @mention typeahead. Kept only because an
     // existing flow version ('Chatter Inline Image Post-1') still sets a
@@ -75,10 +98,17 @@ export default class ChatterImageEditor extends LightningElement {
     // ── Flow input/output (bidirectional) ────────────────────────────────
     @api richTextValue = '';
     @api selectedVisibility;
+    // ContentDocumentIds of files attached with the file upload button.
+    // The poster adds them to the post as regular (non-inline) attachments,
+    // the same as the paperclip in the native Chatter publisher.
+    @api attachmentIds = [];
 
     // ── Internal state ───────────────────────────────────────────────────
     isUploading = false;
     uploadError;
+    linkError;
+    attachmentError;
+    attachments = [];
     mentionQuery = null;
     mentionCandidates = [];
     mentionDropdownTop = 40;
@@ -92,6 +122,14 @@ export default class ChatterImageEditor extends LightningElement {
     _mentionMarker = null;
     _mentionCounter = 0;
     _mentionSearchTimeout;
+    // Ids of users picked from the dropdown as customers (isCustomer). Used
+    // with the current HTML to tell whether a customer mention is still in
+    // the post — deleting the anchor drops it out naturally, no extra
+    // bookkeeping needed.
+    _customerMentionIds = new Set();
+    _imageButtonMarker = null;
+    _pendingLinkUrl = null;
+    _linkCounter = 0;
 
     // ── Resize state ─────────────────────────────────────────────────────
     editorHeight;
@@ -217,6 +255,26 @@ export default class ChatterImageEditor extends LightningElement {
             + `max-height: ${this.mentionDropdownMaxHeight}px;`;
     }
 
+    /**
+     * Customers can't see an Internal Users Only post, so tagging one there
+     * does nothing. The typeahead stops offering customers while the post is
+     * internal, but a customer can still be tagged first and visibility
+     * flipped afterwards — this catches that (validate() blocks Next on it,
+     * and ChatterInlineImagePoster enforces it again server-side).
+     */
+    get customerMentionError() {
+        if (this.currentVisibility === 'AllUsers' || this._customerMentionIds.size === 0) {
+            return null;
+        }
+        const html = this.richTextValue || '';
+        const hasCustomer = [...this._customerMentionIds]
+            .some((id) => html.indexOf(`href="/${id}"`) >= 0);
+        return hasCustomer
+            ? 'Customers can\'t be mentioned in an Internal Users Only post. '
+                + 'Change "To" to All with Access, or remove the customer mention.'
+            : null;
+    }
+
     get currentVisibility() {
         return this._visibilityValue || this.defaultVisibility || 'InternalUsers';
     }
@@ -225,8 +283,27 @@ export default class ChatterImageEditor extends LightningElement {
         return this.disableAdvancedTools ? BASIC_FORMATS : DEFAULT_FORMATS;
     }
 
+    // The custom image button follows the same basic/advanced split as the
+    // built-in 'image' format. The custom link button shows in both modes,
+    // as the built-in 'link' format did.
+    get showImageButton() {
+        return !this.disableAdvancedTools;
+    }
+
     get visibilityOptions() {
         return VISIBILITY_OPTIONS;
+    }
+
+    get showAttachments() {
+        return !this.hideAttachments;
+    }
+
+    get hasAttachments() {
+        return this.attachments.length > 0;
+    }
+
+    get attachmentLimitReached() {
+        return this.attachments.length >= MAX_ATTACHMENTS;
     }
 
     // ── Event handlers ───────────────────────────────────────────────────
@@ -281,9 +358,210 @@ export default class ChatterImageEditor extends LightningElement {
         }
     }
 
+    // ── Toolbar link and image buttons ───────────────────────────────────
+    //
+    // The built-in toolbar image button uploads images as legacy rta-images
+    // that can't be posted, so the template hides it. It can only be hidden
+    // together with the built-in link button (both are in the INSERT_CONTENT
+    // category), so both are replaced by custom buttons here.
+    //
+    // Link: on mousedown, while the editor still has the user's selection,
+    // the selected text is wrapped in a link to a unique placeholder URL.
+    // The click then asks for the real URL and swaps it in for the
+    // placeholder by string replacement, like the caret markers — the
+    // prompt takes focus, so the selection is gone by the time it closes.
+    // With nothing selected, Chrome's createLink inserts the placeholder
+    // URL as the link's text as well, so the same replacement leaves the
+    // real URL as both the text and the href.
+
+    handleLinkButtonMouseDown(event) {
+        event.preventDefault();
+        this._removePendingLink();
+        this.linkError = undefined;
+        if (!this._hasFocus) return;
+        const placeholder = PENDING_LINK_URL_PREFIX + (++this._linkCounter);
+        try {
+            if (document.execCommand('createLink', false, placeholder)) {
+                this._pendingLinkUrl = placeholder;
+            }
+        } catch (e) {
+            // Editor refused the link — the URL gets appended instead.
+        }
+    }
+
+    async handleLinkButtonClick() {
+        const placeholder = this._pendingLinkUrl;
+        const entered = await LightningPrompt.open({
+            label: 'Insert link',
+            message: 'Enter the link URL',
+            defaultValue: 'https://'
+        });
+
+        const url = this._normalizeLinkUrl(entered);
+        if (!url) {
+            this._removePendingLink();
+            if (entered !== null && entered !== undefined && entered.trim() !== '') {
+                this.linkError = 'Links must start with http://, https:// or mailto:.';
+            }
+            return;
+        }
+        this._pendingLinkUrl = null;
+
+        const escaped = this._escapeHtml(url);
+        const current = this._currentValue(placeholder);
+        const updated = (placeholder && current.indexOf(placeholder) >= 0)
+            ? current.split(placeholder).join(escaped)
+            : current + `<a href="${escaped}">${escaped}</a>`;
+        this.richTextValue = updated;
+        this.dispatchEvent(new FlowAttributeChangeEvent('richTextValue', updated));
+    }
+
+    /**
+     * Returns the URL the user entered, with https:// added when they left
+     * the scheme off (e.g. "www.example.com"), or null when there's nothing
+     * usable — only the schemes the poster accepts become links.
+     */
+    _normalizeLinkUrl(entered) {
+        if (entered === null || entered === undefined) return null;
+        let url = entered.trim();
+        if (!url || url === 'https://') return null;
+        if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+            url = 'https://' + url;
+        }
+        return SAFE_LINK_URL_PATTERN.test(url) ? url : null;
+    }
+
+    /**
+     * Unwraps the pending placeholder link (cancelled or invalid URL),
+     * keeping its text — unless the text is the placeholder itself (nothing
+     * was selected), in which case the whole link goes.
+     */
+    _removePendingLink() {
+        const placeholder = this._pendingLinkUrl;
+        this._pendingLinkUrl = null;
+        if (!placeholder) return;
+        const current = this._currentValue(placeholder);
+        if (current.indexOf(placeholder) < 0) return;
+        const escapedPlaceholder = placeholder.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+        const linkPattern = new RegExp(
+            `<a\\b[^>]*href="${escapedPlaceholder}"[^>]*>([\\s\\S]*?)</a>`, 'g'
+        );
+        const cleaned = current.replace(
+            linkPattern, (match, text) => (text === placeholder ? '' : text)
+        );
+        this.richTextValue = cleaned;
+        this.dispatchEvent(new FlowAttributeChangeEvent('richTextValue', cleaned));
+    }
+
+    _escapeHtml(text) {
+        return text.replace(/&/g, '&amp;')
+                   .replace(/</g, '&lt;')
+                   .replace(/>/g, '&gt;')
+                   .replace(/"/g, '&quot;');
+    }
+
+    // Image: opens a file picker and sends the chosen image through the same
+    // upload-and-insert path as a paste, so it posts as a real inline image.
+
+    // mousedown fires before the click moves focus from the editor to the
+    // button, so this is the last moment the editor's selection still marks
+    // where the user wants the image. preventDefault keeps focus in the
+    // editor so the marker lands at the caret.
+    handleImageButtonMouseDown(event) {
+        event.preventDefault();
+        this._clearImageButtonMarker();
+        if (this._hasFocus) {
+            this._imageButtonMarker = this._insertCaretMarker();
+        }
+    }
+
+    handleImageButtonClick() {
+        // Keyboard activation (Enter/Space on the focused button) skips
+        // mousedown, so there's no caret marker — the image appends instead.
+        const input = this.template.querySelector('.image-file-input');
+        if (!input) return;
+        input.value = '';
+        input.click();
+    }
+
+    async handleImageFileChange(event) {
+        const file = event.target.files && event.target.files[0];
+        const marker = this._imageButtonMarker;
+        this._imageButtonMarker = null;
+
+        if (!file) {
+            this._stripMarker(marker);
+            return;
+        }
+        if (!file.type || !file.type.startsWith('image/')) {
+            this._stripMarker(marker);
+            this.uploadError = `"${file.name}" isn't an image file.`;
+            return;
+        }
+
+        await this._uploadAndInsertFile(file, marker);
+    }
+
+    handleImageFileCancel() {
+        this._clearImageButtonMarker();
+    }
+
+    _clearImageButtonMarker() {
+        if (this._imageButtonMarker) {
+            this._stripMarker(this._imageButtonMarker);
+            this._imageButtonMarker = null;
+        }
+    }
+
     handleVisibilityChange(event) {
         this._visibilityValue = event.detail.value;
         this.dispatchEvent(new FlowAttributeChangeEvent('selectedVisibility', this._visibilityValue));
+    }
+
+    // ── File attachments ─────────────────────────────────────────────────
+    //
+    // lightning-file-upload stores each file as a ContentDocument linked to
+    // recordId as soon as it finishes uploading, and handles large files
+    // that couldn't go through an Apex base64 upload like pasted images do.
+    // We only track the returned Ids here; the poster attaches them to the
+    // FeedItem via the files capability.
+
+    handleAttachmentUploadFinished(event) {
+        const uploaded = (event.detail && event.detail.files) || [];
+        const known = new Set(this.attachments.map((a) => a.documentId));
+        const next = [...this.attachments];
+        for (const file of uploaded) {
+            if (!known.has(file.documentId)) {
+                next.push({ documentId: file.documentId, name: file.name });
+                known.add(file.documentId);
+            }
+        }
+        this.attachmentError = next.length > MAX_ATTACHMENTS
+            ? `You can attach up to ${MAX_ATTACHMENTS} files to a post. Remove some before posting.`
+            : undefined;
+        this._setAttachments(next);
+    }
+
+    async handleAttachmentRemove(event) {
+        const documentId = event.detail.name;
+        this._setAttachments(this.attachments.filter((a) => a.documentId !== documentId));
+        if (this.attachments.length <= MAX_ATTACHMENTS) {
+            this.attachmentError = undefined;
+        }
+        try {
+            // Already linked to the record by the upload — delete it so a
+            // removed file doesn't linger on the record unposted.
+            await removeAttachment({ contentDocumentId: documentId });
+        } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error('[chatterImageEditor] removing attachment failed', err);
+        }
+    }
+
+    _setAttachments(list) {
+        this.attachments = list;
+        this.attachmentIds = list.map((a) => a.documentId);
+        this.dispatchEvent(new FlowAttributeChangeEvent('attachmentIds', this.attachmentIds));
     }
 
     // ── Mention typeahead ────────────────────────────────────────────────
@@ -545,7 +823,12 @@ export default class ChatterImageEditor extends LightningElement {
 
     async _runMentionSearch(query) {
         try {
-            const results = await searchMentionableUsers({ searchTerm: query });
+            const results = await searchMentionableUsers({
+                searchTerm: query,
+                recordId: this.recordId || null,
+                // Customers can't see internal-only posts, so don't offer them.
+                includeCustomers: this.currentVisibility === 'AllUsers'
+            });
             // Mode may have already been exited (or moved on to a longer
             // query) while this call was in flight — don't resurrect a
             // dropdown for a mention attempt that's no longer active.
@@ -560,6 +843,7 @@ export default class ChatterImageEditor extends LightningElement {
     handleMentionCandidateSelect(event) {
         const recordId = event.currentTarget.dataset.id;
         const name = event.currentTarget.dataset.name;
+        const isCustomer = event.currentTarget.dataset.customer === 'true';
         const marker = this._mentionMarker;
         const query = this.mentionQuery || '';
 
@@ -588,6 +872,9 @@ export default class ChatterImageEditor extends LightningElement {
         const mentionHtml = `&nbsp;<a href="/${recordId}">@${name}</a>&nbsp;`;
         const updated = before + mentionHtml + after;
 
+        if (isCustomer) {
+            this._customerMentionIds.add(recordId);
+        }
         this.richTextValue = updated;
         this.dispatchEvent(new FlowAttributeChangeEvent('richTextValue', updated));
         this._exitMentionCapture(false);
@@ -697,6 +984,7 @@ export default class ChatterImageEditor extends LightningElement {
     async _uploadAndInsertFile(file, marker) {
         if (!this.recordId) {
             this.uploadError = 'Cannot upload image: parent record Id not available in flow context.';
+            this._stripMarker(marker);
             return;
         }
 
@@ -799,6 +1087,20 @@ export default class ChatterImageEditor extends LightningElement {
             + pad(d.getSeconds());
     }
 
+    /**
+     * Counts <img> tags whose src carries no 069 ContentDocumentId. The
+     * poster can't turn those into inline image segments and has to drop
+     * them, so validate() blocks the post rather than letting them vanish.
+     */
+    _countUnpostableImages(html) {
+        if (!html) return 0;
+        let count = 0;
+        for (const match of html.matchAll(IMG_SRC_PATTERN)) {
+            if (!CONTENT_DOC_ID_PATTERN.test(match[1])) count++;
+        }
+        return count;
+    }
+
     _reduceError(error) {
         if (error?.body?.message) return error.body.message;
         if (error?.message) return error.message;
@@ -816,7 +1118,30 @@ export default class ChatterImageEditor extends LightningElement {
             };
         }
 
-        if (this.required) {
+        if (this.attachments.length > MAX_ATTACHMENTS) {
+            return {
+                isValid: false,
+                errorMessage: `You can attach up to ${MAX_ATTACHMENTS} files to a post. Remove some before posting.`
+            };
+        }
+
+        const unpostableImages = this._countUnpostableImages(this.richTextValue);
+        if (unpostableImages > 0) {
+            return {
+                isValid: false,
+                errorMessage: (unpostableImages === 1 ? 'An image' : `${unpostableImages} images`)
+                    + ' in your post can\'t be posted (for example, an image dragged in or copied'
+                    + ' from a web page). Remove it, then add it with the image button or paste'
+                    + ' it with Ctrl+V.'
+            };
+        }
+
+        if (this.customerMentionError) {
+            return { isValid: false, errorMessage: this.customerMentionError };
+        }
+
+        // A files-only post is valid, as in the native publisher.
+        if (this.required && !this.hasAttachments) {
             const val = (this.richTextValue || '').trim();
             if (!val || val === '<p><br></p>') {
                 return {

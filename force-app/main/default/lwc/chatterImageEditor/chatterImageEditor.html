@@ -17,7 +17,32 @@
                     placeholder={placeholder}
                     formats={formats}
                     variant="bottom-toolbar"
-                ></lightning-input-rich-text>
+                    disabled-categories="INSERT_CONTENT"
+                >
+                    <lightning-rich-text-toolbar-button-group slot="toolbar" aria-label="Insert content">
+                        <lightning-rich-text-toolbar-button
+                            icon-name="utility:link"
+                            icon-alternative-text="Insert link"
+                            onmousedown={handleLinkButtonMouseDown}
+                            onclick={handleLinkButtonClick}
+                        ></lightning-rich-text-toolbar-button>
+                        <template lwc:if={showImageButton}>
+                            <lightning-rich-text-toolbar-button
+                                icon-name="utility:image"
+                                icon-alternative-text="Insert image"
+                                onmousedown={handleImageButtonMouseDown}
+                                onclick={handleImageButtonClick}
+                            ></lightning-rich-text-toolbar-button>
+                        </template>
+                    </lightning-rich-text-toolbar-button-group>
+                </lightning-input-rich-text>
+                <input
+                    type="file"
+                    accept="image/*"
+                    class="image-file-input"
+                    onchange={handleImageFileChange}
+                    oncancel={handleImageFileCancel}
+                />
                 <div
                     class="resize-handle"
                     onmousedown={handleResizeMouseDown}
@@ -33,12 +58,18 @@
                                     class="mention-dropdown__item"
                                     data-id={candidate.recordId}
                                     data-name={candidate.name}
+                                    data-customer={candidate.isCustomer}
                                     onclick={handleMentionCandidateSelect}
                                 >
                                     <template lwc:if={candidate.photoUrl}>
                                         <img src={candidate.photoUrl} alt="" class="mention-dropdown__avatar" />
                                     </template>
-                                    <span>{candidate.name}</span>
+                                    <span class="mention-dropdown__text">
+                                        <span class="mention-dropdown__name">{candidate.name}</span>
+                                        <template lwc:if={candidate.subtitle}>
+                                            <span class="mention-dropdown__subtitle">{candidate.subtitle}</span>
+                                        </template>
+                                    </span>
                                 </button>
                             </li>
                         </template>
@@ -55,14 +86,58 @@
                 </div>
             </template>
 
+            <template lwc:if={customerMentionError}>
+                <div class="slds-m-top_xx-small slds-text-color_error slds-text-body_small">
+                    {customerMentionError}
+                </div>
+            </template>
+
             <template lwc:if={uploadError}>
                 <div class="slds-m-top_xx-small slds-text-color_error slds-text-body_small">
                     {uploadError}
                 </div>
             </template>
+
+            <template lwc:if={linkError}>
+                <div class="slds-m-top_xx-small slds-text-color_error slds-text-body_small">
+                    {linkError}
+                </div>
+            </template>
+
+            <template lwc:if={hasAttachments}>
+                <div class="slds-m-top_x-small attachment-pills">
+                    <template for:each={attachments} for:item="attachment">
+                        <lightning-pill
+                            key={attachment.documentId}
+                            label={attachment.name}
+                            name={attachment.documentId}
+                            onremove={handleAttachmentRemove}
+                        >
+                            <lightning-icon icon-name="doctype:attachment" alternative-text="File"></lightning-icon>
+                        </lightning-pill>
+                    </template>
+                </div>
+            </template>
+
+            <template lwc:if={attachmentError}>
+                <div class="slds-m-top_xx-small slds-text-color_error slds-text-body_small">
+                    {attachmentError}
+                </div>
+            </template>
         </div>
 
         <div class="slds-m-top_small slds-grid slds-grid_align-spread slds-grid_vertical-align-center">
+            <template lwc:if={showAttachments}>
+                <lightning-file-upload
+                    label="Attach files"
+                    variant="label-hidden"
+                    name="chatterAttachments"
+                    record-id={recordId}
+                    multiple
+                    disabled={attachmentLimitReached}
+                    onuploadfinished={handleAttachmentUploadFinished}
+                ></lightning-file-upload>
+            </template>
             <template lwc:if={showVisibilitySelector}>
                 <div class="slds-grid slds-grid_vertical-align-center">
                     <span class="slds-m-right_x-small slds-text-body_small">To</span>

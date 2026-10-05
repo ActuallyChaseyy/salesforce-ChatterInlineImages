@@ -232,20 +232,21 @@ private class ChatterInlineImagePosterTest {
         List<ConnectApi.MessageSegmentInput> segments =
             ChatterInlineImagePoster.buildSegments(html, docIds);
 
-        // Begin(Bold), Text("Hey"), End(Bold), Mention, Text("look:"),
-        // [paragraph break], InlineImage. (The lone space between
-        // </strong> and the mention anchor is whitespace-only, so
-        // String.isBlank drops it — no text segment. The trailing break
+        // Begin(Bold), Text("Hey"), End(Bold), Text(" "), Mention,
+        // Text("  look:"), [paragraph break], InlineImage. (The lone space
+        // between </strong> and the mention anchor is kept as its own text
+        // segment so the words don't run together. The trailing break
         // after the final </p> is stripped.)
-        System.assertEquals(8, segments.size());
+        System.assertEquals(9, segments.size());
         System.assert(segments[0] instanceof ConnectApi.MarkupBeginSegmentInput);
         System.assert(segments[1] instanceof ConnectApi.TextSegmentInput);
         System.assertEquals('Hey', ((ConnectApi.TextSegmentInput) segments[1]).text);
         System.assert(segments[2] instanceof ConnectApi.MarkupEndSegmentInput);
-        System.assert(segments[3] instanceof ConnectApi.MentionSegmentInput);
-        System.assert(segments[4] instanceof ConnectApi.TextSegmentInput);
-        assertParagraphBreak(segments, 5);
-        System.assert(segments[7] instanceof ConnectApi.InlineImageSegmentInput);
+        System.assertEquals(' ', ((ConnectApi.TextSegmentInput) segments[3]).text);
+        System.assert(segments[4] instanceof ConnectApi.MentionSegmentInput);
+        System.assertEquals('  look:', ((ConnectApi.TextSegmentInput) segments[5]).text);
+        assertParagraphBreak(segments, 6);
+        System.assert(segments[8] instanceof ConnectApi.InlineImageSegmentInput);
     }
 
     // ─── buildSegments: line/paragraph breaks ──────────────────────────
@@ -410,7 +411,7 @@ private class ChatterInlineImagePosterTest {
             ChatterInlineImagePoster.buildSegments(html, new Set<Id>());
 
         System.assertEquals(5, segments.size());
-        System.assertEquals('Check', ((ConnectApi.TextSegmentInput) segments[0]).text);
+        System.assertEquals('Check ', ((ConnectApi.TextSegmentInput) segments[0]).text);
         System.assert(segments[1] instanceof ConnectApi.MarkupBeginSegmentInput);
         ConnectApi.MarkupBeginSegmentInput beginSeg = (ConnectApi.MarkupBeginSegmentInput) segments[1];
         System.assertEquals(ConnectApi.MarkupType.Hyperlink, beginSeg.markupType);
@@ -421,7 +422,72 @@ private class ChatterInlineImagePosterTest {
             ConnectApi.MarkupType.Hyperlink,
             ((ConnectApi.MarkupEndSegmentInput) segments[3]).markupType
         );
-        System.assertEquals('now', ((ConnectApi.TextSegmentInput) segments[4]).text);
+        System.assertEquals(' now', ((ConnectApi.TextSegmentInput) segments[4]).text);
+    }
+
+    // ─── buildSegments: word spacing at segment boundaries ─────────────
+    //
+    // Regression coverage for RIS-18546: spacing looked right in the editor
+    // but words ran together once posted. Every text chunk between markers
+    // was trimmed, so the space next to a link, mention or formatting run
+    // was lost — most visibly around URLs (text with forward slashes),
+    // which the editor auto-links as the user types.
+
+    @IsTest
+    static void buildSegments_autoLinkedUrlKeepsSurroundingSpaces() {
+        String html = '<p>Please see <a href="https://example.com/a/b" target="_blank">'
+            + 'https://example.com/a/b</a> for details</p>';
+
+        List<ConnectApi.MessageSegmentInput> segments =
+            ChatterInlineImagePoster.buildSegments(html, new Set<Id>());
+
+        System.assertEquals(5, segments.size());
+        System.assertEquals('Please see ', ((ConnectApi.TextSegmentInput) segments[0]).text);
+        System.assertEquals('https://example.com/a/b', ((ConnectApi.TextSegmentInput) segments[2]).text);
+        System.assertEquals(' for details', ((ConnectApi.TextSegmentInput) segments[4]).text);
+    }
+
+    @IsTest
+    static void buildSegments_formattingKeepsSurroundingSpaces() {
+        String html = '<p>This is <strong>bold</strong> and <em>italic</em> text</p>';
+
+        List<ConnectApi.MessageSegmentInput> segments =
+            ChatterInlineImagePoster.buildSegments(html, new Set<Id>());
+
+        System.assertEquals('This is bold and italic text', joinText(segments));
+    }
+
+    @IsTest
+    static void buildSegments_spaceBetweenAdjacentMarkupIsKept() {
+        String html = '<p><strong>one</strong> <em>two</em></p>';
+
+        List<ConnectApi.MessageSegmentInput> segments =
+            ChatterInlineImagePoster.buildSegments(html, new Set<Id>());
+
+        System.assertEquals('one two', joinText(segments));
+    }
+
+    @IsTest
+    static void buildSegments_sourceFormattingNewlinesBetweenTagsAreDropped() {
+        String html = '<p>line1</p>\n<p>line2</p>\n';
+
+        List<ConnectApi.MessageSegmentInput> segments =
+            ChatterInlineImagePoster.buildSegments(html, new Set<Id>());
+
+        System.assertEquals(4, segments.size());
+        System.assertEquals('line1', ((ConnectApi.TextSegmentInput) segments[0]).text);
+        assertParagraphBreak(segments, 1);
+        System.assertEquals('line2', ((ConnectApi.TextSegmentInput) segments[3]).text);
+    }
+
+    private static String joinText(List<ConnectApi.MessageSegmentInput> segments) {
+        String joined = '';
+        for (ConnectApi.MessageSegmentInput seg : segments) {
+            if (seg instanceof ConnectApi.TextSegmentInput) {
+                joined += ((ConnectApi.TextSegmentInput) seg).text;
+            }
+        }
+        return joined;
     }
 
     @IsTest
@@ -541,6 +607,38 @@ private class ChatterInlineImagePosterTest {
     static void stripHtmlToPlainText_blankInputReturnsEmpty() {
         System.assertEquals('', ChatterInlineImagePoster.stripHtmlToPlainText(null));
         System.assertEquals('', ChatterInlineImagePoster.stripHtmlToPlainText(''));
+    }
+
+    // ─── decodeHtmlEntities ───────────────────────────────────────────
+
+    @IsTest
+    static void decodeHtmlEntities_literalEntityTextIsNotDoubleDecoded() {
+        // A user typing "&lt;b&gt;" as text reaches Apex as
+        // "&amp;lt;b&amp;gt;" — it must post as the literal "&lt;b&gt;",
+        // not be decoded a second time into "<b>".
+        System.assertEquals(
+            '&lt;b&gt; &amp; &nbsp; &quot;',
+            ChatterInlineImagePoster.decodeHtmlEntities(
+                '&amp;lt;b&amp;gt; &amp;amp; &amp;nbsp; &amp;quot;'
+            )
+        );
+    }
+
+    @IsTest
+    static void decodeHtmlEntities_decodesEachEntityOnce() {
+        System.assertEquals(
+            '< > & " \' \'  ',
+            ChatterInlineImagePoster.decodeHtmlEntities('&lt; &gt; &amp; &quot; &#39; &apos; &nbsp;')
+        );
+    }
+
+    @IsTest
+    static void buildSegments_literalEntityTextPostsAsTyped() {
+        List<ConnectApi.MessageSegmentInput> segments =
+            ChatterInlineImagePoster.buildSegments('<p>Use &amp;lt;br&amp;gt; for a break</p>', new Set<Id>());
+
+        System.assertEquals(1, segments.size());
+        System.assertEquals('Use &lt;br&gt; for a break', ((ConnectApi.TextSegmentInput) segments[0]).text);
     }
 
     // ─── resolveVisibility ─────────────────────────────────────────
@@ -688,5 +786,187 @@ private class ChatterInlineImagePosterTest {
         ];
         System.assertEquals(1, attachments.size(), 'one feed attachment created');
         System.assertEquals('InlineImage', attachments[0].Type);
+    }
+
+    // ─── File attachments ─────────────────────────────────────────────
+
+    @IsTest
+    static void parseAttachmentIds_keepsValidIdsInOrderWithoutDuplicates() {
+        String first = '069000000000001AAA';
+        String second = '069000000000002AAA';
+
+        List<Id> ids = ChatterInlineImagePoster.parseAttachmentIds(
+            new List<String>{ first, '', null, 'not-an-id', ' ' + second + ' ', first }
+        );
+
+        System.assertEquals(2, ids.size(), 'blank, invalid and duplicate ids dropped');
+        System.assertEquals(Id.valueOf(first), ids[0]);
+        System.assertEquals(Id.valueOf(second), ids[1]);
+    }
+
+    @IsTest
+    static void parseAttachmentIds_nullReturnsEmptyList() {
+        System.assertEquals(0, ChatterInlineImagePoster.parseAttachmentIds(null).size());
+    }
+
+    @IsTest
+    static void buildFilesCapability_addsEachFile() {
+        List<Id> docIds = new List<Id>{
+            Id.valueOf('069000000000001AAA'), Id.valueOf('069000000000002AAA')
+        };
+
+        ConnectApi.FeedElementCapabilitiesInput capabilities =
+            ChatterInlineImagePoster.buildFilesCapability(docIds);
+
+        System.assertEquals(2, capabilities.files.items.size());
+        System.assertEquals(docIds[0], ((ConnectApi.FileIdInput) capabilities.files.items[0]).id);
+        System.assertEquals(docIds[1], ((ConnectApi.FileIdInput) capabilities.files.items[1]).id);
+    }
+
+    @IsTest
+    static void postFeedItems_moreThanTenAttachmentsReturnsError() {
+        List<String> ids = new List<String>();
+        for (Integer i = 10; i < 21; i++) {
+            ids.add('0690000000000' + i + 'AAA');
+        }
+
+        ChatterInlineImagePoster.Request req = new ChatterInlineImagePoster.Request();
+        req.parentId = UserInfo.getUserId();
+        req.richTextHtml = '<p>Too many files</p>';
+        req.attachmentIds = ids;
+
+        List<ChatterInlineImagePoster.Result> results =
+            ChatterInlineImagePoster.postFeedItems(
+                new List<ChatterInlineImagePoster.Request>{ req }
+            );
+
+        System.assertEquals(false, results[0].success);
+        System.assert(results[0].errorMessage.contains('at most 10'), results[0].errorMessage);
+    }
+
+    @IsTest(SeeAllData=true)
+    static void postFeedItems_withAttachmentEndToEnd() {
+        Id parentId = UserInfo.getUserId();
+
+        ContentVersion cv = new ContentVersion(
+            Title = 'attachment.txt',
+            PathOnClient = 'attachment.txt',
+            VersionData = Blob.valueOf('attachment body'),
+            FirstPublishLocationId = parentId
+        );
+        insert cv;
+        Id docId = [SELECT ContentDocumentId FROM ContentVersion WHERE Id = :cv.Id].ContentDocumentId;
+
+        ChatterInlineImagePoster.Request req = new ChatterInlineImagePoster.Request();
+        req.parentId = parentId;
+        req.richTextHtml = '<p>See attached</p>';
+        req.visibility = 'AllUsers';
+        req.attachmentIds = new List<String>{ docId };
+
+        Test.startTest();
+        List<ChatterInlineImagePoster.Result> results =
+            ChatterInlineImagePoster.postFeedItems(
+                new List<ChatterInlineImagePoster.Request>{ req }
+            );
+        Test.stopTest();
+
+        System.assertEquals(true, results[0].success, 'post succeeded: ' + results[0].errorMessage);
+
+        List<FeedAttachment> attachments = [
+            SELECT Id, Type, RecordId
+            FROM FeedAttachment
+            WHERE FeedEntityId = :results[0].postId
+        ];
+        System.assertEquals(1, attachments.size(), 'one feed attachment created');
+        System.assertEquals('Content', attachments[0].Type);
+    }
+
+    @IsTest(SeeAllData=true)
+    static void postFeedItems_attachmentOnlyWithBlankHtmlEndToEnd() {
+        Id parentId = UserInfo.getUserId();
+
+        ContentVersion cv = new ContentVersion(
+            Title = 'attachment-only.txt',
+            PathOnClient = 'attachment-only.txt',
+            VersionData = Blob.valueOf('attachment body'),
+            FirstPublishLocationId = parentId
+        );
+        insert cv;
+        Id docId = [SELECT ContentDocumentId FROM ContentVersion WHERE Id = :cv.Id].ContentDocumentId;
+
+        ChatterInlineImagePoster.Request req = new ChatterInlineImagePoster.Request();
+        req.parentId = parentId;
+        req.richTextHtml = '';
+        req.visibility = 'AllUsers';
+        req.attachmentIds = new List<String>{ docId };
+
+        Test.startTest();
+        List<ChatterInlineImagePoster.Result> results =
+            ChatterInlineImagePoster.postFeedItems(
+                new List<ChatterInlineImagePoster.Request>{ req }
+            );
+        Test.stopTest();
+
+        System.assertEquals(true, results[0].success, 'post succeeded: ' + results[0].errorMessage);
+        System.assertEquals(
+            1,
+            [SELECT COUNT() FROM FeedAttachment WHERE FeedEntityId = :results[0].postId AND Type = 'Content'],
+            'file attached to the post'
+        );
+    }
+
+    // ─── Customer mentions vs. Internal Users Only ────────────────────
+
+    @IsTest
+    static void postFeedItems_internalPostWithCustomerMentionIsRejected() {
+        ChatterMentionTestData d = ChatterMentionTestData.create();
+
+        ChatterInlineImagePoster.Request req = new ChatterInlineImagePoster.Request();
+        req.parentId = d.supportCase.Id;
+        req.richTextHtml = '<p>Hi <a href="/' + d.caseContactUser.Id + '">@Contact</a></p>';
+        req.visibility = 'InternalUsers';
+
+        List<ChatterInlineImagePoster.Result> results;
+        System.runAs(d.agent) {
+            Test.startTest();
+            results = ChatterInlineImagePoster.postFeedItems(
+                new List<ChatterInlineImagePoster.Request>{ req }
+            );
+            Test.stopTest();
+        }
+
+        System.assertEquals(false, results[0].success, 'customer mention on an internal post is rejected');
+        System.assert(
+            results[0].errorMessage.contains('Internal Users Only'),
+            'error explains why: ' + results[0].errorMessage
+        );
+    }
+
+    @IsTest
+    static void assertNoCustomerMentions_allowsStaffMentions() {
+        List<ConnectApi.MessageSegmentInput> segments = ChatterInlineImagePoster.buildSegments(
+            '<p>Hi <a href="/' + UserInfo.getUserId() + '">@Me</a></p>', null
+        );
+        // Throws if the running (Standard) user were treated as a customer.
+        ChatterInlineImagePoster.assertNoCustomerMentions(segments);
+    }
+
+    @IsTest
+    static void assertNoCustomerMentions_rejectsCustomerMentions() {
+        ChatterMentionTestData d = ChatterMentionTestData.create();
+        List<ConnectApi.MessageSegmentInput> segments = ChatterInlineImagePoster.buildSegments(
+            '<p>Hi <a href="/' + d.accountUser.Id + '">@Colleague</a></p>', null
+        );
+
+        Boolean threw = false;
+        System.runAs(d.agent) {
+            try {
+                ChatterInlineImagePoster.assertNoCustomerMentions(segments);
+            } catch (IllegalArgumentException e) {
+                threw = true;
+                System.assert(e.getMessage().contains(ChatterMentionTestData.NAME_PREFIX), e.getMessage());
+            }
+        }
+        System.assert(threw, 'customer mention is rejected');
     }
 }
