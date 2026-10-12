@@ -766,7 +766,7 @@ export default class ChatterImageEditor extends LightningElement {
             return;
         }
 
-        this._resyncMentionQueryFromContent();
+        this._resyncMentionQueryFromContent(event);
     }
 
     /**
@@ -780,7 +780,7 @@ export default class ChatterImageEditor extends LightningElement {
      * from ground truth on every keystroke sidesteps the whole class of
      * bug rather than chasing each input method individually.
      */
-    _resyncMentionQueryFromContent() {
+    _resyncMentionQueryFromContent(event) {
         const marker = this._mentionMarker;
         if (!marker) return;
 
@@ -789,9 +789,16 @@ export default class ChatterImageEditor extends LightningElement {
         const markerIdx = plain.lastIndexOf(marker);
 
         if (markerIdx === -1) {
-            // Marker's gone — whatever removed/mangled it took the
-            // in-progress mention with it.
+            // Marker's gone — usually because a backspace with an empty
+            // query ate just its last character. The rest of it is still
+            // sitting invisibly after the "@", and each leftover character
+            // used to cost the user another backspace before the "@" itself
+            // went. That backspace was aimed at the "@", so remove it along
+            // with the residue.
+            const removeAt = this.mentionQuery === ''
+                && event && event.inputType === 'deleteContentBackward';
             this._exitMentionCapture(false);
+            this._stripMentionMarkerResidue(removeAt);
             return;
         }
 
@@ -869,7 +876,13 @@ export default class ChatterImageEditor extends LightningElement {
             before = before.slice(0, -1);
         }
         const after = current.substring(markerIdx + marker.length + query.length);
-        const mentionHtml = `&nbsp;<a href="/${recordId}">@${name}</a>&nbsp;`;
+        // Only pad with a space where one isn't already there — padding
+        // unconditionally left a doubled space before the mention (after
+        // the user's own) and an extra character after it.
+        const startsLine = before === '' || /<(?:p|div|li|h[1-6])[^>]*>$|<br\s*\/?>$/i.test(before);
+        const lead = startsLine || /(?:\s|&nbsp;)$/.test(before) ? '' : '&nbsp;';
+        const trail = /^(?:\s|&nbsp;)/.test(after) ? '' : '&nbsp;';
+        const mentionHtml = `${lead}<a href="/${recordId}">@${name}</a>${trail}`;
         const updated = before + mentionHtml + after;
 
         if (isCustomer) {
@@ -918,6 +931,30 @@ export default class ChatterImageEditor extends LightningElement {
             // Editor refused the marker — no mention dropdown this time.
         }
         return null;
+    }
+
+    /**
+     * Removes what's left of a partially-deleted mention marker. Only runs
+     * containing a ZWNJ are touched, so a live image-paste marker (word
+     * joiner + ZWSPs) is never mistaken for residue. When removeAt is set,
+     * the "@" right before the last residue goes too.
+     */
+    _stripMentionMarkerResidue(removeAt) {
+        const residue = /@?(?:‌​*‌?|​+‌)/g;
+        const current = this._currentValue();
+        let lastOffset = -1;
+        current.replace(residue, (match, offset) => {
+            lastOffset = offset;
+            return match;
+        });
+        if (lastOffset === -1) return;
+
+        const cleaned = current.replace(residue, (match, offset) => {
+            const keepAt = match.startsWith('@') && !(removeAt && offset === lastOffset);
+            return keepAt ? '@' : '';
+        });
+        this.richTextValue = cleaned;
+        this.dispatchEvent(new FlowAttributeChangeEvent('richTextValue', cleaned));
     }
 
     async _onDocumentPaste(event) {

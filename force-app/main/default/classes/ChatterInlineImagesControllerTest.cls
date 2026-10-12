@@ -251,12 +251,14 @@ private class ChatterInlineImagesControllerTest {
     @IsTest
     static void searchMentionableUsers_excludesCustomersWhenRecordIsNotACase() {
         ChatterMentionTestData d = ChatterMentionTestData.create();
-        CollaborationGroup notACase = setupParent();
+        // Any non-Case Id will do. Inserting a CollaborationGroup here hit
+        // MIXED_DML_OPERATION after the fixture's UserRole insert.
+        Id notACaseId = d.agent.Id;
 
         List<ChatterInlineImagesController.MentionCandidate> results;
         System.runAs(d.agent) {
             results = ChatterInlineImagesController.searchMentionableUsers(
-                ChatterMentionTestData.NAME_PREFIX, notACase.Id, true
+                ChatterMentionTestData.NAME_PREFIX, notACaseId, true
             );
         }
 
